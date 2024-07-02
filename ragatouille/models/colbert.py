@@ -11,7 +11,6 @@ import torch
 from colbert import Trainer
 from colbert.infra import ColBERTConfig, Run, RunConfig
 from colbert.modeling.checkpoint import Checkpoint
-
 from ragatouille.models.base import LateInteractionModel
 from ragatouille.models.index import ModelIndex, ModelIndexFactory
 
@@ -38,6 +37,8 @@ class ColBERT(LateInteractionModel):
         self.base_model_max_tokens = 510
         if n_gpu == -1:
             n_gpu = 1 if torch.cuda.device_count() == 0 else torch.cuda.device_count()
+
+        self.n_gpu = n_gpu
 
         self.loaded_from_index = load_from_index
 
@@ -98,7 +99,7 @@ class ColBERT(LateInteractionModel):
             d[v].append(k)
         return d
 
-    def _get_collection_files_from_disk(self, index_path: str):
+    def _get_collection_files_from_disk(self, index_path: Path):
         self.collection = srsly.read_json(index_path / "collection.json")
         if os.path.exists(str(index_path / "docid_metadata_map.json")):
             self.docid_metadata_map = srsly.read_json(
@@ -389,7 +390,12 @@ class ColBERT(LateInteractionModel):
 
         # TODO We may want to load an existing index here instead;
         #      For now require that either index() was called, or an existing one was loaded.
-        assert self.model_index is not None
+        if self.model_index is None:
+            print("Loading model_index ...")
+            assert isinstance(index_name, str), "index_name cannot be None"
+            self.loading_index(index_name=index_name)
+
+        assert self.model_index != None, "somehow self.model_index is None Type"
 
         results = self.model_index.search(
             self.config,
@@ -737,6 +743,24 @@ class ColBERT(LateInteractionModel):
         del self.in_memory_embed_docs
         del self.doc_masks
         del self.inference_ckpt_len_set
+
+    def loading_index(self, *, index_name: str):
+        index_path = str(
+            Path(self.index_root) / "colbert" / "indexes" / self.index_name
+        )
+        ckpt_config = ColBERTConfig.load_from_index(Path(index_path))
+        self.model_index = ModelIndexFactory.load_from_file(
+            index_path, index_name, ckpt_config
+        )
+        self.config = self.model_index.config
+        self.run_config = RunConfig(
+            nranks=self.n_gpu, experiment=self.config.experiment, root=self.config.root
+        )
+        split_root = index_path.split("/")[:-1]
+        self.config.root = "/".join(split_root)
+        self.index_root = self.config.root
+        self.checkpoint = self.config.checkpoint
+        self._get_collection_files_from_disk(Path(index_path))
 
     def __del__(self):
         # Clean up context
