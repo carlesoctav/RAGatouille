@@ -11,7 +11,6 @@ import torch
 from colbert import Trainer
 from colbert.infra import ColBERTConfig, Run, RunConfig
 from colbert.modeling.checkpoint import Checkpoint
-
 from ragatouille.models.base import LateInteractionModel
 from ragatouille.models.index import ModelIndex, ModelIndexFactory
 
@@ -38,6 +37,8 @@ class ColBERT(LateInteractionModel):
         self.base_model_max_tokens = 510
         if n_gpu == -1:
             n_gpu = 1 if torch.cuda.device_count() == 0 else torch.cuda.device_count()
+
+        self.n_gpu = n_gpu
 
         self.loaded_from_index = load_from_index
 
@@ -98,7 +99,7 @@ class ColBERT(LateInteractionModel):
             d[v].append(k)
         return d
 
-    def _get_collection_files_from_disk(self, index_path: str):
+    def _get_collection_files_from_disk(self, index_path: Path):
         self.collection = srsly.read_json(index_path / "collection.json")
         if os.path.exists(str(index_path / "docid_metadata_map.json")):
             self.docid_metadata_map = srsly.read_json(
@@ -142,7 +143,6 @@ class ColBERT(LateInteractionModel):
             "WARNING: add_to_index support is currently experimental!",
             "add_to_index support will be more thorough in future versions",
         )
-
         if self.loaded_from_index:
             index_root = self.config.root
         else:
@@ -152,12 +152,8 @@ class ColBERT(LateInteractionModel):
             else:
                 index_root = str(Path(self.config.root) / expected_path_segment)
 
-            if not self.collection:
-                collection_path = Path(index_root) / self.index_name / "collection.json"
-                if collection_path.exists():
-                    self._get_collection_files_from_disk(
-                        str(Path(index_root) / self.index_name)
-                    )
+        if self.model_index is None:
+            self._loading_index(index_name = index_name)
 
         new_documents_with_ids = [
             {"content": doc, "document_id": new_pid_docid_map[pid]}
@@ -173,7 +169,6 @@ class ColBERT(LateInteractionModel):
 
         # TODO We may want to load an existing index here instead;
         #      For now require that either index() was called, or an existing one was loaded.
-        assert self.model_index is not None
 
         # TODO We probably want to store some of this in the model_index directly.
         self.model_index.add(
@@ -228,6 +223,9 @@ class ColBERT(LateInteractionModel):
             "delete_from_index support will be more thorough in future versions",
         )
 
+        if self.model_index is None:
+            self._loading_index(index_name = index_name)
+
         pids_to_remove = []
         for pid, docid in self.pid_docid_map.items():
             if docid in document_ids:
@@ -235,7 +233,7 @@ class ColBERT(LateInteractionModel):
 
         # TODO We may want to load an existing index here instead;
         #      For now require that either index() was called, or an existing one was loaded.
-        assert self.model_index is not None
+        # assert self.model_index is not None
 
         # TODO We probably want to store some of this in the model_index directly.
         self.model_index.delete(
@@ -249,7 +247,7 @@ class ColBERT(LateInteractionModel):
 
         # Update and serialize the index metadata + collection.
         self.collection = [
-            doc for pid, doc in enumerate(self.collection) if pid not in pids_to_remove
+            doc if pid not in pids_to_remove else "" for pid, doc in enumerate(self.collection) 
         ]
         self.pid_docid_map = {
             pid: docid
@@ -389,7 +387,12 @@ class ColBERT(LateInteractionModel):
 
         # TODO We may want to load an existing index here instead;
         #      For now require that either index() was called, or an existing one was loaded.
-        assert self.model_index is not None
+        if self.model_index is None:
+            print("Loading model_index ...")
+            assert isinstance(index_name, str), "index_name cannot be None"
+            self._loading_index(index_name=index_name)
+
+        assert self.model_index != None, "somehow self.model_index is None Type"
 
         results = self.model_index.search(
             self.config,
@@ -737,6 +740,24 @@ class ColBERT(LateInteractionModel):
         del self.in_memory_embed_docs
         del self.doc_masks
         del self.inference_ckpt_len_set
+
+    def _loading_index(self, *, index_name: str):
+        self.index_path = str(
+            Path(self.index_root) / "colbert" / "indexes" / self.index_name
+        )
+        ckpt_config = ColBERTConfig.load_from_index(Path(self.index_path))
+        self.model_index = ModelIndexFactory.load_from_file(
+            self.index_path, index_name, ckpt_config
+        )
+        self.config = self.model_index.config
+        self.run_config = RunConfig(
+            nranks=self.n_gpu, experiment=self.config.experiment, root=self.config.root
+        )
+        split_root = self.index_path.split("/")[:-1]
+        self.config.root = "/".join(split_root)
+        self.index_root = self.config.root
+        self.checkpoint = self.config.checkpoint
+        self._get_collection_files_from_disk(Path(self.index_path))
 
     def __del__(self):
         # Clean up context
