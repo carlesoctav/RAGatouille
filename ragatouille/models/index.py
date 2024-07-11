@@ -219,7 +219,7 @@ class PLAIDModelIndex(ModelIndex):
                     config=self.config,
                     verbose=verbose,
                 )
-                indexer.configure(avoid_fork_if_possible=True)
+                indexer.configure(avoid_fork_if_possible=False)
                 indexer.index(
                     name=index_name, collection=collection, overwrite=overwrite
                 )
@@ -250,7 +250,7 @@ class PLAIDModelIndex(ModelIndex):
                 config=self.config,
                 verbose=verbose,
             )
-            indexer.configure(avoid_fork_if_possible=True)
+            indexer.configure(avoid_fork_if_possible=False)
             indexer.index(name=index_name, collection=collection, overwrite=overwrite)
 
         return self
